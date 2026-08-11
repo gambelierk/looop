@@ -881,12 +881,20 @@
       const slot = Math.max(w + opts.tracking, 2);
       const sStart = s, sEnd = s + slot, center = s + w / 2;
       if (sEnd > 0 && sStart < totalLen) {
-        const steps = clamp(Math.round(slot / curveStep), 1, 20);
+        // Background reach extends forward only, past this character's own
+        // end, never backward. Forward reach is always immediately painted
+        // over by the next character's own draw, so it's harmless there -
+        // but backward reach would repaint over the *previous* character's
+        // already-finished glyph, which is what broke every letter into a
+        // crescent last time.
+        const reachEnd = clamp(sEnd + clamp(opts.fontSize * 0.25, 3, 50), 0, totalLen);
+        const bgSpan = reachEnd - sStart;
+        const steps = clamp(Math.round(bgSpan / curveStep), 1, 30);
         const p0 = getPointAndAngle(model, clamp(sStart, 0, totalLen));
         dctx.beginPath();
         dctx.moveTo(p0.x, p0.y);
         for (let k = 1; k <= steps; k++) {
-          const sk = clamp(sStart + (slot * k) / steps, 0, totalLen);
+          const sk = clamp(sStart + (bgSpan * k) / steps, 0, totalLen);
           const pk = getPointAndAngle(model, sk);
           if (pk) dctx.lineTo(pk.x, pk.y);
         }
