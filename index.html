@@ -990,8 +990,8 @@
       };
       drawBaseStroke(screenModel, opts);
       const avgCharWidth = unit.U / unit.chars.length;
-      drawBackgroundOnly(screenModel, unit, scrollOffset - avgCharWidth * 1.25, opts);
-      drawBackgroundOnly(screenModel, unit, scrollOffset - avgCharWidth * 2.5, opts);
+      drawBackgroundOnly(screenModel, unit, scrollOffset - avgCharWidth * 0.5, opts);
+      drawBackgroundOnly(screenModel, unit, scrollOffset - avgCharWidth * 1, opts);
       drawTape(screenModel, unit, scrollOffset, opts);
     }
   }
