@@ -933,10 +933,7 @@
     let i0 = clamp(upperBound(unit.cum, phase) - 1, 0, n - 1);
     let s = -(phase - unit.cum[i0]);
     let idx = i0;
-    // Slightly wider than the main layer's tube, so it overpaints past
-    // whatever is causing the seam rather than relying on its offset
-    // exactly bridging it.
-    const halfH = (opts.fontSize + opts.padding * 2) / 2 + Math.max(3, opts.fontSize * 0.08);
+    const halfH = (opts.fontSize + opts.padding * 2) / 2;
     const curveStep = clamp(opts.fontSize * 0.1, 3, 10);
     ctx.lineCap = "butt";
     ctx.lineJoin = "round";
