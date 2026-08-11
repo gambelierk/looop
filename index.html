@@ -917,6 +917,51 @@
     }
   }
 
+  // A second background-only pass (no glyphs), phase-shifted by half a
+  // character's width from the main pass. The main pass's per-character
+  // seams sit at fixed points along the tape; this pass's seams fall
+  // elsewhere, so wherever one layer has a hairline seam, the other layer
+  // is solid underneath it - same idea as drawBaseStroke, but targeted at
+  // the seams the base pass's own long chords can still leave on very tight
+  // curves (e.g. near a spiral's center), rather than the whole path.
+  function drawBackgroundOnly(model, unit, offset, opts) {
+    const totalLen = model.totalLen;
+    if (totalLen < 1 || unit.U < 1) return;
+    const n = unit.chars.length;
+    let phase = (-offset) % unit.U;
+    if (phase < 0) phase += unit.U;
+    let i0 = clamp(upperBound(unit.cum, phase) - 1, 0, n - 1);
+    let s = -(phase - unit.cum[i0]);
+    let idx = i0;
+    const halfH = (opts.fontSize + opts.padding * 2) / 2;
+    const curveStep = clamp(opts.fontSize * 0.1, 3, 10);
+    ctx.lineCap = "butt";
+    ctx.lineJoin = "round";
+    ctx.strokeStyle = opts.pathColor;
+    ctx.lineWidth = halfH * 2;
+    let guard = 0;
+    while (s < totalLen && guard < 20000) {
+      guard++;
+      const w = unit.widths[((idx % n) + n) % n];
+      const slot = Math.max(w + opts.tracking, 2);
+      const sStart = s, sEnd = s + slot;
+      if (sEnd > 0 && sStart < totalLen) {
+        const steps = clamp(Math.round(slot / curveStep), 1, 20);
+        const p0 = getPointAndAngle(model, clamp(sStart, 0, totalLen));
+        ctx.beginPath();
+        ctx.moveTo(p0.x, p0.y);
+        for (let k = 1; k <= steps; k++) {
+          const sk = clamp(sStart + (slot * k) / steps, 0, totalLen);
+          const pk = getPointAndAngle(model, sk);
+          if (pk) ctx.lineTo(pk.x, pk.y);
+        }
+        ctx.stroke();
+      }
+      s += slot;
+      idx++;
+    }
+  }
+
   function buildFontStr() {
     return state.fontWeight + " " + state.fontSize + "px " + state.fontFamily;
   }
@@ -944,6 +989,8 @@
         fontStr
       };
       drawBaseStroke(screenModel, opts);
+      const avgCharWidth = unit.U / unit.chars.length;
+      drawBackgroundOnly(screenModel, unit, scrollOffset + avgCharWidth / 2, opts);
       drawTape(screenModel, unit, scrollOffset, opts);
     }
   }
