@@ -780,6 +780,22 @@
   const stage = document.getElementById("stage");
   const badge = document.getElementById("badge");
 
+  // Offscreen buffers used to clip background+text to the true tube shape.
+  // At tight curves with little padding relative to font size, a rotated
+  // glyph's corners can extend past its own local slice of tube - nothing
+  // is drawn afterward to cover that, so it shows through. No combination
+  // of extra background passes can fix that (they all trace the same
+  // centerline at the same width, so they can never cover more than a
+  // single full-path stroke already does). Instead: render content to
+  // `contentCanvas`, render a clean single-stroke tube shape (no text, no
+  // rotation quirks) to `maskCanvas`, then keep only the content pixels
+  // that overlap the mask - which makes it geometrically impossible for
+  // anything to render outside the tube.
+  const maskCanvas = document.createElement("canvas");
+  const maskCtx = maskCanvas.getContext("2d");
+  const contentCanvas = document.createElement("canvas");
+  const contentCtx = contentCanvas.getContext("2d");
+
   function regenerateDesignModel(d) {
     designModel = buildModelFromD(d);
     updateScreenModel();
@@ -809,6 +825,8 @@
     canvas.height = Math.round(cssH * dpr);
     canvas.style.width = cssW + "px";
     canvas.style.height = cssH + "px";
+    maskCanvas.width = canvas.width; maskCanvas.height = canvas.height;
+    contentCanvas.width = canvas.width; contentCanvas.height = canvas.height;
     updateScreenModel();
   }
   new ResizeObserver(resize).observe(stage);
@@ -827,7 +845,7 @@
     return { chars, widths, cum, U: cum[cum.length - 1] };
   }
 
-  function drawTape(model, unit, offset, opts) {
+  function drawTape(dctx, model, unit, offset, opts) {
     const totalLen = model.totalLen;
     if (totalLen < 1 || unit.U < 1) return;
     const n = unit.chars.length;
@@ -847,10 +865,10 @@
     // and since consecutive characters' paths share that exact point, the
     // seam between them is still invisible.
     const curveStep = clamp(opts.fontSize * 0.1, 3, 10);
-    ctx.lineCap = "butt";
-    ctx.lineJoin = "round";
-    ctx.strokeStyle = opts.pathColor;
-    ctx.lineWidth = halfH * 2;
+    dctx.lineCap = "butt";
+    dctx.lineJoin = "round";
+    dctx.strokeStyle = opts.pathColor;
+    dctx.lineWidth = halfH * 2;
     let guard = 0;
     while (s < totalLen && guard < 20000) {
       guard++;
@@ -865,27 +883,27 @@
       if (sEnd > 0 && sStart < totalLen) {
         const steps = clamp(Math.round(slot / curveStep), 1, 20);
         const p0 = getPointAndAngle(model, clamp(sStart, 0, totalLen));
-        ctx.beginPath();
-        ctx.moveTo(p0.x, p0.y);
+        dctx.beginPath();
+        dctx.moveTo(p0.x, p0.y);
         for (let k = 1; k <= steps; k++) {
           const sk = clamp(sStart + (slot * k) / steps, 0, totalLen);
           const pk = getPointAndAngle(model, sk);
-          if (pk) ctx.lineTo(pk.x, pk.y);
+          if (pk) dctx.lineTo(pk.x, pk.y);
         }
-        ctx.stroke();
+        dctx.stroke();
         if (center >= 0 && center <= totalLen) {
           const ch = unit.chars[((idx % n) + n) % n];
           if (ch !== " ") {
             const pt = getPointAndAngle(model, center);
-            ctx.save();
-            ctx.translate(pt.x, pt.y);
-            ctx.rotate(pt.angle);
-            ctx.fillStyle = opts.textColor;
-            ctx.textAlign = "center";
-            ctx.textBaseline = "middle";
-            ctx.font = opts.fontStr;
-            ctx.fillText(ch, 0, Math.round(opts.fontSize * 0.03) + opts.baselineOffset);
-            ctx.restore();
+            dctx.save();
+            dctx.translate(pt.x, pt.y);
+            dctx.rotate(pt.angle);
+            dctx.fillStyle = opts.textColor;
+            dctx.textAlign = "center";
+            dctx.textBaseline = "middle";
+            dctx.font = opts.fontStr;
+            dctx.fillText(ch, 0, Math.round(opts.fontSize * 0.03) + opts.baselineOffset);
+            dctx.restore();
           }
         }
       }
@@ -895,70 +913,21 @@
   }
 
   // A single, uninterrupted stroke of the whole path (one moveTo/lineTo chain
-  // per subpath, one stroke() call), drawn underneath the per-character pass.
-  // It has no internal seams by construction, so it also gives the path
-  // properly rounded caps at its absolute start/end. The chunked pass above
-  // it needs butt caps for correct text occlusion at crossings, which means
-  // any hairline anti-aliasing seam between two adjacent character-strokes
-  // can't fully hide the pixel behind it - this base layer is that pixel,
-  // in the same color, so the seam disappears.
-  function drawBaseStroke(model, opts) {
+  // per subpath, one stroke() call). Has no internal seams by construction,
+  // and no text/rotation quirks, so it reliably represents the true tube
+  // shape - used both as a visible base layer and as the clip mask below.
+  function drawBaseStroke(dctx, model, opts) {
     const halfH = (opts.fontSize + opts.padding * 2) / 2;
-    ctx.lineCap = "round";
-    ctx.lineJoin = "round";
-    ctx.strokeStyle = opts.pathColor;
-    ctx.lineWidth = halfH * 2;
+    dctx.lineCap = "round";
+    dctx.lineJoin = "round";
+    dctx.strokeStyle = opts.pathColor;
+    dctx.lineWidth = halfH * 2;
     for (const sp of model.subpaths) {
       if (sp.pts.length < 2) continue;
-      ctx.beginPath();
-      ctx.moveTo(sp.pts[0][0], sp.pts[0][1]);
-      for (let i = 1; i < sp.pts.length; i++) ctx.lineTo(sp.pts[i][0], sp.pts[i][1]);
-      ctx.stroke();
-    }
-  }
-
-  // A second background-only pass (no glyphs), phase-shifted by half a
-  // character's width from the main pass. The main pass's per-character
-  // seams sit at fixed points along the tape; this pass's seams fall
-  // elsewhere, so wherever one layer has a hairline seam, the other layer
-  // is solid underneath it - same idea as drawBaseStroke, but targeted at
-  // the seams the base pass's own long chords can still leave on very tight
-  // curves (e.g. near a spiral's center), rather than the whole path.
-  function drawBackgroundOnly(model, unit, offset, opts) {
-    const totalLen = model.totalLen;
-    if (totalLen < 1 || unit.U < 1) return;
-    const n = unit.chars.length;
-    let phase = (-offset) % unit.U;
-    if (phase < 0) phase += unit.U;
-    let i0 = clamp(upperBound(unit.cum, phase) - 1, 0, n - 1);
-    let s = -(phase - unit.cum[i0]);
-    let idx = i0;
-    const halfH = (opts.fontSize + opts.padding * 2) / 2;
-    const curveStep = clamp(opts.fontSize * 0.1, 3, 10);
-    ctx.lineCap = "butt";
-    ctx.lineJoin = "round";
-    ctx.strokeStyle = opts.pathColor;
-    ctx.lineWidth = halfH * 2;
-    let guard = 0;
-    while (s < totalLen && guard < 20000) {
-      guard++;
-      const w = unit.widths[((idx % n) + n) % n];
-      const slot = Math.max(w + opts.tracking, 2);
-      const sStart = s, sEnd = s + slot;
-      if (sEnd > 0 && sStart < totalLen) {
-        const steps = clamp(Math.round(slot / curveStep), 1, 20);
-        const p0 = getPointAndAngle(model, clamp(sStart, 0, totalLen));
-        ctx.beginPath();
-        ctx.moveTo(p0.x, p0.y);
-        for (let k = 1; k <= steps; k++) {
-          const sk = clamp(sStart + (slot * k) / steps, 0, totalLen);
-          const pk = getPointAndAngle(model, sk);
-          if (pk) ctx.lineTo(pk.x, pk.y);
-        }
-        ctx.stroke();
-      }
-      s += slot;
-      idx++;
+      dctx.beginPath();
+      dctx.moveTo(sp.pts[0][0], sp.pts[0][1]);
+      for (let i = 1; i < sp.pts.length; i++) dctx.lineTo(sp.pts[i][0], sp.pts[i][1]);
+      dctx.stroke();
     }
   }
 
@@ -976,7 +945,7 @@
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.fillStyle = state.bgColor;
     ctx.fillRect(0, 0, cssW, cssH);
-    if (screenModel && screenModel.totalLen > 0) {
+    if (screenModel && screenModel.totalLen > 0 && cssW > 0 && cssH > 0) {
       const fontStr = buildFontStr();
       const unit = buildUnit(state.text, fontStr);
       const opts = {
@@ -988,11 +957,38 @@
         tracking: state.tracking,
         fontStr
       };
-      drawBaseStroke(screenModel, opts);
-      const avgCharWidth = unit.U / unit.chars.length;
-      drawBackgroundOnly(screenModel, unit, scrollOffset - avgCharWidth * 0.5, opts);
-      drawBackgroundOnly(screenModel, unit, scrollOffset - avgCharWidth * 0.5, opts);
-      drawTape(screenModel, unit, scrollOffset, opts);
+
+      // Mask: the clean tube shape only, on its own buffer, slightly wider
+      // than the visible tube so the content layer's anti-aliased edge is
+      // never itself clipped off.
+      maskCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      maskCtx.clearRect(0, 0, cssW, cssH);
+      drawBaseStroke(maskCtx, screenModel, Object.assign({}, opts, { padding: opts.padding + 1 }));
+
+      // Content: background + text, same as before, on its own buffer.
+      contentCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      contentCtx.clearRect(0, 0, cssW, cssH);
+      drawBaseStroke(contentCtx, screenModel, opts);
+      drawTape(contentCtx, screenModel, unit, scrollOffset, opts);
+
+      // Clip content to the mask: keep only content pixels that overlap an
+      // opaque mask pixel. Composite in device pixels (identity transform)
+      // so the two buffers align exactly. Guard on the buffers' actual
+      // pixel size (not just cssW/cssH) - drawImage throws synchronously
+      // on a zero-size source, and a resize can land between measuring
+      // cssW/cssH and getting here.
+      if (maskCanvas.width > 0 && maskCanvas.height > 0 && contentCanvas.width > 0 && contentCanvas.height > 0) {
+        contentCtx.save();
+        contentCtx.setTransform(1, 0, 0, 1, 0, 0);
+        contentCtx.globalCompositeOperation = "destination-in";
+        contentCtx.drawImage(maskCanvas, 0, 0);
+        contentCtx.restore();
+
+        ctx.save();
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.drawImage(contentCanvas, 0, 0);
+        ctx.restore();
+      }
     }
   }
 
