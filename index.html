@@ -898,6 +898,17 @@
             dctx.save();
             dctx.translate(pt.x, pt.y);
             dctx.rotate(pt.angle);
+            // Clip the glyph to this character's own local slot (along-path
+            // x from -w/2 to slot-w/2, perpendicular y within the tube).
+            // The full-path mask only constrains the tube's width - it has
+            // no notion of per-character boundaries, so a glyph that
+            // overflows sideways at a tight curve is still "inside the
+            // tube" as far as that mask cares, and can bleed into a
+            // neighboring character's already-finished space. This clip
+            // stops that at the source.
+            dctx.beginPath();
+            dctx.rect(-w / 2, -halfH, slot, halfH * 2);
+            dctx.clip();
             dctx.fillStyle = opts.textColor;
             dctx.textAlign = "center";
             dctx.textBaseline = "middle";
@@ -918,15 +929,29 @@
   // shape - used both as a visible base layer and as the clip mask below.
   function drawBaseStroke(dctx, model, opts) {
     const halfH = (opts.fontSize + opts.padding * 2) / 2;
+    // Resample each subpath at the same fine, fixed arc-length step the
+    // per-character content pass uses (curveStep), rather than connecting
+    // the raw flattened points directly. The raw points come from bezier
+    // chord-flattening (chord/6) and can be coarser than curveStep at large
+    // render scales - when used as the clip mask, that coarseness cuts
+    // corners slightly differently than the content layer's finer sampling
+    // does at the same tight bend, so content can poke past the mask's
+    // corner-cut edge and get clipped off unevenly (visible as crescents).
+    // Matching resolution here removes that mismatch entirely.
+    const curveStep = clamp(opts.fontSize * 0.1, 3, 10);
     dctx.lineCap = "round";
     dctx.lineJoin = "round";
     dctx.strokeStyle = opts.pathColor;
     dctx.lineWidth = halfH * 2;
     for (const sp of model.subpaths) {
-      if (sp.pts.length < 2) continue;
+      if (sp.pts.length < 2 || sp.len < 0.01) continue;
+      const steps = clamp(Math.round(sp.len / curveStep), 2, 6000);
       dctx.beginPath();
-      dctx.moveTo(sp.pts[0][0], sp.pts[0][1]);
-      for (let i = 1; i < sp.pts.length; i++) dctx.lineTo(sp.pts[i][0], sp.pts[i][1]);
+      for (let k = 0; k <= steps; k++) {
+        const localS = clamp((sp.len * k) / steps, 0, sp.len);
+        const pt = pointOnSubpath(sp, localS);
+        if (k === 0) dctx.moveTo(pt.x, pt.y); else dctx.lineTo(pt.x, pt.y);
+      }
       dctx.stroke();
     }
   }
