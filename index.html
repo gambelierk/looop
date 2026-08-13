@@ -1283,9 +1283,16 @@
     const raw = drawPoints;
     exitDrawMode();
     if (raw.length < 2) return;
-    const simplified = rdpSimplify(raw, 20);
-    const relaxed = smoothPolyline(simplified.length >= 2 ? simplified : raw, 3);
-    const d = smoothPointsToPath(relaxed);
+    // Smooth first, simplify second - not the other way around. Smoothing
+    // the dense raw points barely shifts anything (neighbors are only a
+    // couple px apart), so it kills jitter without touching the overall
+    // shape. Smoothing *after* simplification instead averages a handful of
+    // widely-spaced points, which drags them toward each other and warps
+    // the shape - that's what "distorted, doesn't retain the overall shape"
+    // was.
+    const relaxedRaw = smoothPolyline(raw, 2);
+    const simplified = rdpSimplify(relaxedRaw, 20);
+    const d = smoothPointsToPath(simplified.length >= 2 ? simplified : relaxedRaw);
     // Deliberately does NOT touch customD.value: whatever SVG was in the
     // textbox before drawing (the default, or anything pasted) stays there
     // untouched, so "Apply path" always reverts to it. Otherwise drawing
@@ -1456,10 +1463,16 @@
       // is what makes the loop seamless: frame 0 and the frame right after
       // the last one are identical, since the tape's appearance is a
       // periodic function of offset mod unit.U.
-      const targetFps = 20;
+      // 30fps (~1/30s per frame). The cap is raised well past what the old
+      // 60-frame limit allowed so a fixed 1/30s delay actually holds for
+      // typical loop lengths - that limit was silently stretching the
+      // per-frame delay (frameCount stayed fixed at 60, so delay = loop
+      // length / 60 grew with it) for anything longer than a ~3s loop,
+      // which is why frames were sitting for 0.19s instead of 1/30s.
+      const targetFps = 30;
       const loopSeconds = unit.U / state.speed;
       let frameCount = Math.round(loopSeconds * targetFps);
-      frameCount = clamp(frameCount, 8, 60);
+      frameCount = clamp(frameCount, 8, 240);
       const delayMs = Math.max(20, Math.round((1000 * loopSeconds) / frameCount));
 
       const W = canvas.width, H = canvas.height;
@@ -1468,6 +1481,14 @@
       const format = "rgb444";
       let palette = null;
 
+      // Yield by elapsed time, not a fixed frame interval: each frame here
+      // is normally only a few ms of work, so a fixed "every N frames"
+      // schedule yields far more often than needed - and every yield can
+      // cost a full throttled timer tick in a backgrounded tab (setTimeout,
+      // not requestAnimationFrame, since rAF can be paused indefinitely
+      // when hidden - but browsers still clamp/throttle timers in
+      // background tabs, so minimizing *how many* yields happen matters).
+      let lastYield = performance.now();
       for (let i = 0; i < frameCount; i++) {
         exportGifBtn.textContent = "Rendering " + (i + 1) + "/" + frameCount + "…";
         const off = baseOffset + (state.direction * (unit.U * i)) / frameCount;
@@ -1476,11 +1497,10 @@
         if (!palette) palette = window.GifencLib.quantize(data, 256, { format });
         const index = window.GifencLib.applyPalette(data, palette, format);
         gif.writeFrame(index, W, H, { palette: i === 0 ? palette : undefined, delay: delayMs, repeat: 0 });
-        // Yield periodically so the tab stays responsive during longer exports.
-        // setTimeout, not requestAnimationFrame: rAF can be paused
-        // indefinitely in a backgrounded/hidden tab, which would hang the
-        // export if the user switches away mid-export.
-        if (i % 3 === 2) await new Promise((r) => setTimeout(r, 0));
+        if (performance.now() - lastYield > 80) {
+          await new Promise((r) => setTimeout(r, 0));
+          lastYield = performance.now();
+        }
       }
       gif.finish();
 
