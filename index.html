@@ -1265,7 +1265,7 @@
     const raw = drawPoints;
     exitDrawMode();
     if (raw.length < 2) return;
-    const simplified = rdpSimplify(raw, 12);
+    const simplified = rdpSimplify(raw, 20);
     const d = smoothPointsToPath(simplified.length >= 2 ? simplified : raw);
     if (d) {
       customD.value = d;
