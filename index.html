@@ -1305,6 +1305,34 @@
   // drop the near-duplicate last point and flag it closed, so downstream
   // smoothing and curve-fitting wrap around the seam instead of leaving an
   // open end sitting right next to the start.
+  // RDP simplification never considers the wrap-around edge from the last
+  // point back to the first - it only ever removes points *within* the
+  // array it's given, treated as open. So on a closed loop, that one
+  // closing edge can come out much shorter than its neighbors, and the
+  // cyclic Catmull-Rom's tangent estimate there (which depends on the
+  // *previous* segment's length too) gets unstable enough to point back
+  // into the shape - a visible inward cusp right at the seam. If the
+  // closing edge is disproportionately short compared to the average
+  // segment, just merge its two endpoints into one point instead: one
+  // point at the seam, not two crowded together.
+  function mergeShortSeam(points) {
+    const n = points.length;
+    if (n < 4) return points;
+    let totalLen = 0;
+    for (let i = 0; i < n; i++) {
+      const a = points[i], b = points[(i + 1) % n];
+      totalLen += Math.hypot(b[0] - a[0], b[1] - a[1]);
+    }
+    const avgSeg = totalLen / n;
+    const first = points[0], last = points[n - 1];
+    const seamLen = Math.hypot(last[0] - first[0], last[1] - first[1]);
+    if (seamLen < avgSeg * 0.5) {
+      const merged = [(first[0] + last[0]) / 2, (first[1] + last[1]) / 2];
+      return [merged, ...points.slice(1, n - 1)];
+    }
+    return points;
+  }
+
   function detectClosure(raw) {
     if (raw.length < 6) return { points: raw, closed: false };
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
@@ -1317,7 +1345,21 @@
     const gap = Math.hypot(last[0] - first[0], last[1] - first[1]);
     const threshold = Math.max(18, diag * 0.08);
     if (gap <= threshold && diag > threshold * 2) {
-      return { points: raw.slice(0, raw.length - 1), closed: true };
+      // A hand closing a loop usually overshoots slightly - the last
+      // several points aren't just "near the start", they're a little tail
+      // that's already curled back past it. Dropping only the final point
+      // leaves that whole overlapping tail in, which is what was crossing
+      // itself right at the seam. Walk backward and drop every trailing
+      // point that's still within the threshold of the start, so the
+      // remaining stroke ends right as it *approaches* the start rather
+      // than after it's already circled past. minKeep is a safety net for
+      // a very small/tight loop, so this can't eat the whole stroke.
+      const minKeep = Math.max(4, Math.floor(raw.length * 0.4));
+      let cut = raw.length - 1;
+      while (cut > minKeep && Math.hypot(raw[cut][0] - first[0], raw[cut][1] - first[1]) <= threshold) {
+        cut--;
+      }
+      return { points: raw.slice(0, cut + 1), closed: true };
     }
     return { points: raw, closed: false };
   }
@@ -1338,8 +1380,10 @@
     // was.
     const relaxedRaw = smoothPolyline(startPts, drawSmoothingIterations, cornerThresholdDeg, closed);
     const simplified = rdpSimplify(relaxedRaw, 20);
-    const finalPts = simplified.length >= 2 ? simplified : relaxedRaw;
-    const d = smoothPointsToPath(finalPts, closed && finalPts.length >= 3);
+    let finalPts = simplified.length >= 2 ? simplified : relaxedRaw;
+    const isClosed = closed && finalPts.length >= 3;
+    if (isClosed) finalPts = mergeShortSeam(finalPts);
+    const d = smoothPointsToPath(finalPts, isClosed);
     // Deliberately does NOT touch customD.value: whatever SVG was in the
     // textbox before drawing (the default, or anything pasted) stays there
     // untouched, so "Apply path" always reverts to it. Otherwise drawing
