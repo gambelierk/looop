@@ -1300,12 +1300,35 @@
     drawPoints.push(canvasPointFromEvent(e));
     e.preventDefault();
   });
+  // If the stroke's start and end land close together relative to how big
+  // the whole drawing is, treat it as a loop the user meant to close:
+  // drop the near-duplicate last point and flag it closed, so downstream
+  // smoothing and curve-fitting wrap around the seam instead of leaving an
+  // open end sitting right next to the start.
+  function detectClosure(raw) {
+    if (raw.length < 6) return { points: raw, closed: false };
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const p of raw) {
+      if (p[0] < minX) minX = p[0]; if (p[0] > maxX) maxX = p[0];
+      if (p[1] < minY) minY = p[1]; if (p[1] > maxY) maxY = p[1];
+    }
+    const diag = Math.hypot(maxX - minX, maxY - minY);
+    const first = raw[0], last = raw[raw.length - 1];
+    const gap = Math.hypot(last[0] - first[0], last[1] - first[1]);
+    const threshold = Math.max(18, diag * 0.08);
+    if (gap <= threshold && diag > threshold * 2) {
+      return { points: raw.slice(0, raw.length - 1), closed: true };
+    }
+    return { points: raw, closed: false };
+  }
+
   function finishDrawing() {
     if (!drawingActive) return;
     drawingActive = false;
     const raw = drawPoints;
     exitDrawMode();
     if (raw.length < 2) return;
+    const { points: startPts, closed } = detectClosure(raw);
     // Smooth first, simplify second - not the other way around. Smoothing
     // the dense raw points barely shifts anything (neighbors are only a
     // couple px apart), so it kills jitter without touching the overall
@@ -1313,9 +1336,10 @@
     // widely-spaced points, which drags them toward each other and warps
     // the shape - that's what "distorted, doesn't retain the overall shape"
     // was.
-    const relaxedRaw = smoothPolyline(raw, drawSmoothingIterations, cornerThresholdDeg);
+    const relaxedRaw = smoothPolyline(startPts, drawSmoothingIterations, cornerThresholdDeg, closed);
     const simplified = rdpSimplify(relaxedRaw, 20);
-    const d = smoothPointsToPath(simplified.length >= 2 ? simplified : relaxedRaw);
+    const finalPts = simplified.length >= 2 ? simplified : relaxedRaw;
+    const d = smoothPointsToPath(finalPts, closed && finalPts.length >= 3);
     // Deliberately does NOT touch customD.value: whatever SVG was in the
     // textbox before drawing (the default, or anything pasted) stays there
     // untouched, so "Apply path" always reverts to it. Otherwise drawing
@@ -1383,14 +1407,20 @@
   // neighbors' midpoint like a normal moving average; at or above it (a
   // corner the hand actually meant to draw), the point is left exactly
   // where it is, every iteration.
-  function smoothPolyline(points, iterations, cornerThresholdDeg) {
+  // `closed`: when true, the point list is treated as a ring (index 0's
+  // neighbors are the last point and index 1, wrapping around) instead of
+  // an open line with the two ends held fixed - so the seam of a closed
+  // loop gets smoothed exactly like every other point, not left as a kink.
+  function smoothPolyline(points, iterations, cornerThresholdDeg, closed) {
     const thresholdRad = ((cornerThresholdDeg == null ? 60 : cornerThresholdDeg) * Math.PI) / 180;
     let pts = points;
     for (let iter = 0; iter < iterations; iter++) {
-      if (pts.length < 3) break;
-      const next = [pts[0]];
-      for (let i = 1; i < pts.length - 1; i++) {
-        const a = pts[i - 1], b = pts[i], c = pts[i + 1];
+      const n = pts.length;
+      if (n < 3) break;
+      const next = [];
+      for (let i = 0; i < n; i++) {
+        if (!closed && (i === 0 || i === n - 1)) { next.push(pts[i]); continue; }
+        const a = pts[(i - 1 + n) % n], b = pts[i], c = pts[(i + 1) % n];
         const v1x = b[0] - a[0], v1y = b[1] - a[1];
         const v2x = c[0] - b[0], v2y = c[1] - b[1];
         const len1 = Math.hypot(v1x, v1y), len2 = Math.hypot(v2x, v2y);
@@ -1405,7 +1435,6 @@
           next.push([(a[0] + 2 * b[0] + c[0]) / 4, (a[1] + 2 * b[1] + c[1]) / 4]);
         }
       }
-      next.push(pts[pts.length - 1]);
       pts = next;
     }
     return pts;
@@ -1414,24 +1443,31 @@
   // Fits a smooth cubic-bezier curve through every point (Catmull-Rom, the
   // standard "smooth curve through these points" conversion) - the simplify-
   // then-smooth pipeline shown in the reference image.
-  function smoothPointsToPath(points) {
+  // `closed`: fits a *cyclic* Catmull-Rom - every point's neighbors wrap
+  // around the ring (including at the seam between the last and first
+  // point), so the curve is C1-continuous all the way around with no kink
+  // where it closes, then ends with Z instead of just stopping.
+  function smoothPointsToPath(points, closed) {
     if (points.length < 2) return "";
-    if (points.length === 2) {
+    if (!closed && points.length === 2) {
       return "M" + points[0][0].toFixed(2) + "," + points[0][1].toFixed(2) +
         " L" + points[1][0].toFixed(2) + "," + points[1][1].toFixed(2);
     }
+    const n = points.length;
     let d = "M" + points[0][0].toFixed(2) + "," + points[0][1].toFixed(2) + " ";
-    for (let i = 0; i < points.length - 1; i++) {
-      const p0 = points[i - 1] || points[i];
-      const p1 = points[i];
-      const p2 = points[i + 1];
-      const p3 = points[i + 2] || p2;
+    const segCount = closed ? n : n - 1;
+    for (let i = 0; i < segCount; i++) {
+      const p0 = closed ? points[(i - 1 + n) % n] : (points[i - 1] || points[i]);
+      const p1 = points[i % n];
+      const p2 = points[(i + 1) % n];
+      const p3 = closed ? points[(i + 2) % n] : (points[i + 2] || p2);
       const c1x = p1[0] + (p2[0] - p0[0]) / 6;
       const c1y = p1[1] + (p2[1] - p0[1]) / 6;
       const c2x = p2[0] - (p3[0] - p1[0]) / 6;
       const c2y = p2[1] - (p3[1] - p1[1]) / 6;
       d += "C" + c1x.toFixed(2) + "," + c1y.toFixed(2) + " " + c2x.toFixed(2) + "," + c2y.toFixed(2) + " " + p2[0].toFixed(2) + "," + p2[1].toFixed(2) + " ";
     }
+    if (closed) d += "Z";
     return d.trim();
   }
 
