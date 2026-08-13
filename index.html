@@ -732,7 +732,16 @@
       subpaths.push({ pts, cum, len });
       totalLen += len;
     }
-    return { subpaths, totalLen, bbox };
+    // A single subpath whose flattened start and end points coincide (a
+    // real closed loop, whether from a trailing Z or just because the
+    // curve was fit that way) needs arc-length lookups to *wrap* around
+    // the seam rather than stop there - otherwise the repeating text tape
+    // has nothing before s=0 or after s=totalLen to continue into, and
+    // every character that should sit just past either end instead
+    // collapses onto that single boundary point.
+    const closed = subpaths.length === 1 && subpaths[0].len > 0 &&
+      dist(subpaths[0].pts[0], subpaths[0].pts[subpaths[0].pts.length - 1]) < 1;
+    return { subpaths, totalLen, bbox, closed };
   }
 
   function fitTransform(bbox, w, h) {
@@ -749,6 +758,7 @@
   function transformModel(model, t) {
     return {
       totalLen: model.totalLen * t.scale,
+      closed: model.closed,
       subpaths: model.subpaths.map(sp => ({
         pts: sp.pts.map(p => [p[0] * t.scale + t.offX, p[1] * t.scale + t.offY]),
         cum: sp.cum.map(c => c * t.scale),
@@ -773,7 +783,11 @@
   }
 
   function getPointAndAngle(model, s) {
-    s = clamp(s, 0, model.totalLen);
+    if (model.closed && model.totalLen > 0) {
+      s = ((s % model.totalLen) + model.totalLen) % model.totalLen;
+    } else {
+      s = clamp(s, 0, model.totalLen);
+    }
     let base = 0;
     for (let i = 0; i < model.subpaths.length; i++) {
       const sp = model.subpaths[i];
@@ -934,26 +948,33 @@
       // letter rather than a gap in the tube itself.
       const slot = Math.max(w + opts.tracking, 2);
       const sStart = s, sEnd = s + slot, center = s + w / 2;
-      if (sEnd > 0 && sStart < totalLen) {
+      // On a closed loop, getPointAndAngle wraps s around automatically -
+      // every character is "in range" somewhere on the ring, so the usual
+      // open-path bounds gate (which exists to skip characters entirely
+      // outside the path's physical extent) doesn't apply. Without this,
+      // a character whose phase-adjusted sStart lands before 0 would get
+      // skipped instead of correctly wrapping to the tail end of the loop,
+      // which is what piled text up at the seam.
+      if (model.closed || (sEnd > 0 && sStart < totalLen)) {
         // Background reach extends forward only, past this character's own
         // end, never backward. Forward reach is always immediately painted
         // over by the next character's own draw, so it's harmless there -
         // but backward reach would repaint over the *previous* character's
         // already-finished glyph, which is what broke every letter into a
         // crescent last time.
-        const reachEnd = clamp(sEnd + clamp(opts.fontSize * 0.25, 3, 50), 0, totalLen);
+        const reachEnd = sEnd + clamp(opts.fontSize * 0.25, 3, 50);
         const bgSpan = reachEnd - sStart;
         const steps = clamp(Math.round(bgSpan / curveStep), 1, 30);
-        const p0 = getPointAndAngle(model, clamp(sStart, 0, totalLen));
+        const p0 = getPointAndAngle(model, sStart);
         dctx.beginPath();
         dctx.moveTo(p0.x, p0.y);
         for (let k = 1; k <= steps; k++) {
-          const sk = clamp(sStart + (bgSpan * k) / steps, 0, totalLen);
+          const sk = sStart + (bgSpan * k) / steps;
           const pk = getPointAndAngle(model, sk);
           if (pk) dctx.lineTo(pk.x, pk.y);
         }
         dctx.stroke();
-        if (center >= 0 && center <= totalLen) {
+        if (model.closed || (center >= 0 && center <= totalLen)) {
           const ch = unit.chars[((idx % n) + n) % n];
           if (ch !== " ") {
             const pt = getPointAndAngle(model, center);
