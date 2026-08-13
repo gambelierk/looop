@@ -462,6 +462,15 @@
         <div class="hint">Click and drag on the canvas (or touch and drag on mobile) to draw a path freehand. It's simplified and smoothed automatically when you release.</div>
       </div>
       <div class="field">
+        <label>Draw smoothing <span class="val" id="drawSmoothingVal">2</span></label>
+        <input type="range" id="drawSmoothing" min="0" max="8" value="2" step="1">
+      </div>
+      <div class="field">
+        <label>Corner threshold <span class="val" id="cornerThresholdVal">60°</span></label>
+        <input type="range" id="cornerThreshold" min="15" max="170" value="60" step="5">
+        <div class="hint">Bends sharper than this are kept exactly as drawn; gentler bends and straight-line jitter get smoothed.</div>
+      </div>
+      <div class="field">
         <label>SVG path <span style="text-transform:none;font-weight:400;">d</span> attribute</label>
         <textarea id="customD" placeholder="M50,300 C150,100 350,500 500,300 S 800,100 950,300">M.5,1168.62C.5,522.64,347.71,378.64,479.24,374.55c120.62-3.75,200.43,53.62,187.67,213.2s-171.07,390.65-305.12,333.2-17.13-321.88,192.77-339.58c211.92-17.87,417.46,105.96,540.02,105.96,70.21,0,149.37-56.17,149.37-123.83s-25.53-108.51-97.02-113.62-130.22,89.36-122.56,160.86,89.36,160.86,180.01,160.86c136.6,0,227.24-126.39,227.24-268.09,0-63.83-65.11-268.09-282.14-268.09s-339.58,187.67-339.58,405.97c0,142.98,144.26,361.29,399.59,361.29,330.65,0,500.44-303.84,500.44-499.16S1598.85.5,1212.03.5,490.73,379.66,490.73,642.65s164.69,657.47,635.76,657.47,880.88-634.49,880.88-634.49</textarea>
         <div class="hint">Supports M L H V C S Q T A Z, absolute or relative.</div>
@@ -1239,6 +1248,20 @@
   const drawHint = document.getElementById("drawHint");
   const cancelDrawBtn = document.getElementById("cancelDrawBtn");
 
+  let drawSmoothingIterations = 2;
+  const drawSmoothing = document.getElementById("drawSmoothing"), drawSmoothingVal = document.getElementById("drawSmoothingVal");
+  drawSmoothing.addEventListener("input", () => {
+    drawSmoothingIterations = +drawSmoothing.value;
+    drawSmoothingVal.textContent = String(drawSmoothingIterations);
+  });
+
+  let cornerThresholdDeg = 60;
+  const cornerThreshold = document.getElementById("cornerThreshold"), cornerThresholdVal = document.getElementById("cornerThresholdVal");
+  cornerThreshold.addEventListener("input", () => {
+    cornerThresholdDeg = +cornerThreshold.value;
+    cornerThresholdVal.textContent = cornerThresholdDeg + "°";
+  });
+
   function enterDrawMode() {
     inDrawMode = true;
     drawingActive = false;
@@ -1290,7 +1313,7 @@
     // widely-spaced points, which drags them toward each other and warps
     // the shape - that's what "distorted, doesn't retain the overall shape"
     // was.
-    const relaxedRaw = smoothPolyline(raw, 2);
+    const relaxedRaw = smoothPolyline(raw, drawSmoothingIterations, cornerThresholdDeg);
     const simplified = rdpSimplify(relaxedRaw, 20);
     const d = smoothPointsToPath(simplified.length >= 2 ? simplified : relaxedRaw);
     // Deliberately does NOT touch customD.value: whatever SVG was in the
@@ -1354,14 +1377,33 @@
   // survive still sit exactly where the hand drew them, jitter included.
   // This pulls each interior point toward its neighbors' midpoint, which is
   // what actually softens that jitter before the curve fit below runs.
-  function smoothPolyline(points, iterations) {
+  // Corner-preserving: at each interior point, measures the turning angle
+  // between the incoming and outgoing segment. Below cornerThresholdDeg
+  // (a gentle bend, or straight-line jitter) it gets pulled toward its
+  // neighbors' midpoint like a normal moving average; at or above it (a
+  // corner the hand actually meant to draw), the point is left exactly
+  // where it is, every iteration.
+  function smoothPolyline(points, iterations, cornerThresholdDeg) {
+    const thresholdRad = ((cornerThresholdDeg == null ? 60 : cornerThresholdDeg) * Math.PI) / 180;
     let pts = points;
     for (let iter = 0; iter < iterations; iter++) {
       if (pts.length < 3) break;
       const next = [pts[0]];
       for (let i = 1; i < pts.length - 1; i++) {
         const a = pts[i - 1], b = pts[i], c = pts[i + 1];
-        next.push([(a[0] + 2 * b[0] + c[0]) / 4, (a[1] + 2 * b[1] + c[1]) / 4]);
+        const v1x = b[0] - a[0], v1y = b[1] - a[1];
+        const v2x = c[0] - b[0], v2y = c[1] - b[1];
+        const len1 = Math.hypot(v1x, v1y), len2 = Math.hypot(v2x, v2y);
+        let turn = 0;
+        if (len1 > 0 && len2 > 0) {
+          const dot = clamp((v1x * v2x + v1y * v2y) / (len1 * len2), -1, 1);
+          turn = Math.acos(dot); // 0 = straight through, PI = doubles back
+        }
+        if (turn >= thresholdRad) {
+          next.push(b); // sharp corner - keep exactly as drawn
+        } else {
+          next.push([(a[0] + 2 * b[0] + c[0]) / 4, (a[1] + 2 * b[1] + c[1]) / 4]);
+        }
       }
       next.push(pts[pts.length - 1]);
       pts = next;
