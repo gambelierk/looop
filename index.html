@@ -922,6 +922,16 @@
     let i0 = clamp(upperBound(unit.cum, phase) - 1, 0, n - 1);
     let s = -(phase - unit.cum[i0]);
     let idx = i0;
+    // On a closed loop, s=0 and s=totalLen are the *same physical point* -
+    // so walking from this (slightly negative) starting s up to a fixed
+    // totalLen draws characters near both the start AND the end of one lap
+    // at that same spot: two different letters landing on top of each
+    // other, which is the overlap at the seam. The walk needs to cover
+    // exactly one lap's worth of arc-length from wherever it happens to
+    // start, not up to a fixed totalLen regardless of start. Open paths
+    // don't have this problem (the two ends are physically apart), so they
+    // keep the original fixed bound.
+    const sLimit = model.closed ? s + totalLen : totalLen;
     const halfH = (opts.fontSize + opts.padding * 2) / 2;
     // Background is a stroke that hugs the curve within each character's own
     // slot (a handful of sample points, stroked as one path) rather than a
@@ -938,7 +948,7 @@
     dctx.strokeStyle = opts.pathColor;
     dctx.lineWidth = halfH * 2;
     let guard = 0;
-    while (s < totalLen && guard < 20000) {
+    while (s < sLimit && guard < 20000) {
       guard++;
       const w = unit.widths[((idx % n) + n) % n];
       // The background span (and the walk's advance) uses the full slot,
