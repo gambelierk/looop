@@ -917,10 +917,27 @@
     const totalLen = model.totalLen;
     if (totalLen < 1 || unit.U < 1) return;
     const n = unit.chars.length;
-    let phase = (-offset) % unit.U;
-    if (phase < 0) phase += unit.U;
-    let i0 = clamp(upperBound(unit.cum, phase) - 1, 0, n - 1);
-    let s = -(phase - unit.cum[i0]);
+    // For a closed loop, the repeating text pattern almost never divides
+    // evenly into the loop's length - so no matter where the per-frame walk
+    // is bounded, the last character before completing the lap either
+    // overshoots into the first character (overlap/cut-off glyphs) or
+    // leaves a gap. Rather than patch around wherever that mismatch lands,
+    // remove it: stretch or compress every character's advance by the same
+    // tiny factor so an exact whole number of repeats fits the loop
+    // perfectly. The adjustment is proportional to 1/repeatCount, so it's
+    // imperceptible whenever the text repeats more than a handful of times
+    // - which any real "loop of text" does.
+    let widthScale = 1;
+    if (model.closed) {
+      const repeatCount = Math.max(1, Math.round(totalLen / unit.U));
+      widthScale = totalLen / (repeatCount * unit.U);
+    }
+    const scaledU = unit.U * widthScale;
+    let phase = (-offset) % scaledU;
+    if (phase < 0) phase += scaledU;
+    const phaseUnscaled = phase / widthScale;
+    let i0 = clamp(upperBound(unit.cum, phaseUnscaled) - 1, 0, n - 1);
+    let s = -(phase - unit.cum[i0] * widthScale);
     let idx = i0;
     // On a closed loop, s=0 and s=totalLen are the *same physical point* -
     // so walking from this (slightly negative) starting s up to a fixed
@@ -950,7 +967,7 @@
     let guard = 0;
     while (s < sLimit && guard < 20000) {
       guard++;
-      const w = unit.widths[((idx % n) + n) % n];
+      const w = unit.widths[((idx % n) + n) % n] * widthScale;
       // The background span (and the walk's advance) uses the full slot,
       // including tracking, so the tube stays continuous - only the glyph
       // stays sized to its own natural width, centered in the first part of
